@@ -1,0 +1,12 @@
+{
+  "name": "azul-cerezo",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "packages/database"
+  ]
+}
