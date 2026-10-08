@@ -1,0 +1,1081 @@
+// AZUL CEREZO — schema físico para revisión.
+// No incluye migraciones, seed ni código de aplicación.
+//
+// Fuera de este archivo, a propósito: Invoice, InvoiceLine, Payment,
+// sales tax, depósito, saldo, portal, cuenta de trabajador y pasarela.
+//
+// Visit.companyId es obligatorio y entra en la FK compuesta
+// (companyId, serviceId) → Service(companyId, id).
+//
+// Service.quoteId es @unique a propósito en el MVP: una Quote aceptada
+// genera como máximo un Service. Varios Service pueden tener quoteId null.
+//
+// Property.addressId es @unique a propósito en el MVP: una propiedad,
+// una dirección, sin compartir Address entre propiedades.
+//
+// Prisma solo permite que un escalar participe en una @relation.
+// Por eso companyId se usa en una sola relación por modelo:
+//   - raíz de empresa → Company(id)
+//   - hija de un agregado → (companyId, parentId) del padre
+// La primera migración SQL debe añadir, además del SQL de Prisma,
+// los índices parciales y las FKs compuestas que Prisma no puede expresar.
+// No hace falta un CHECK de leadId/clientId: esa regla vive en la aplicación.
+//
+// ---------------------------------------------------------------------------
+// Validación solo de aplicación, dentro de la transacción que escribe
+// ---------------------------------------------------------------------------
+// - QuoteRequest: lead con client null, client con lead null, o ambos en la
+//   conversión. Nunca los dos vacíos. Sin CHECK en la base.
+// - QuoteRequest.propertyId solo si hay clientId, y esa Property pertenece
+//   a ese Client y a la misma empresa.
+// - Enviar Quote solo con permiso quotes.send, desde IN_REVIEW, y con
+//   PropertyAssessment DONE o WAIVED cuando requiresAssessment es true.
+// - Al pasar una Quote a ACCEPTED, las hermanas en DRAFT, IN_REVIEW o SENT
+//   de la misma QuoteRequest pasan a SUPERSEDED con closureReason SUPERSEDED.
+// - Service recurrente: la primera Visit nace INITIAL y las siguientes
+//   MAINTENANCE. Tras gapResetDays la visita nace MAINTENANCE y solo recibe
+//   kindSuggestion INITIAL. Aceptar o descartar la sugerencia es otra acción.
+// - ChecklistRun se crea al preparar la Visit, copiando la plantilla activa
+//   de su visitKind. Como máximo una corrida; puede no existir antes.
+// - Completar una Visit exige las fotos de requiredPhotoKinds si photosRequired.
+// - Cancelación: horas hasta scheduledDate + windowStart en la zona de la
+//   empresa. Porcentajes leídos de CancellationPolicyTier. Política apagada
+//   → porcentaje calculado 0, salvo excepción. No se guarda un monto.
+// - windowEnd posterior a windowStart. Porcentajes entre 0 y 100.
+// - Buffer de 45 minutos: aviso, no bloqueo.
+// - El companyId escrito coincide con el del token.
+// - Conversión de Lead: se crea Client.sourceLeadId. No hay un segundo
+//   puntero Lead.clientId, para que los dos no puedan divergir.
+//
+// ---------------------------------------------------------------------------
+// Primera migración SQL — índices parciales (Prisma no los modela)
+// ---------------------------------------------------------------------------
+// CREATE UNIQUE INDEX "Quote_one_accepted_per_request"
+//   ON "Quote" ("quoteRequestId")
+//   WHERE "status" = 'ACCEPTED';
+//
+// CREATE UNIQUE INDEX "Contact_one_primary_per_client"
+//   ON "Contact" ("clientId")
+//   WHERE "isPrimary" = true;
+//
+// CREATE UNIQUE INDEX "ChecklistTemplate_one_active_per_kind"
+//   ON "ChecklistTemplate" ("companyId", "visitKind")
+//   WHERE "isActive" = true;
+//
+// ---------------------------------------------------------------------------
+// Primera migración SQL — FKs que Prisma no puede declarar
+// Cada tabla hija cuyo companyId ya está usado en otra @relation necesita
+// también la FK directa a Company. Los padres opcionales o el segundo padre
+// obligatorio necesitan la FK compuesta (companyId, parentId).
+// ON DELETE RESTRICT ON UPDATE CASCADE, salvo las dos compuestas opcionales
+// que acompañan un SET NULL de Prisma. Esas usan SET NULL solo de la
+// columna nullable: anular también companyId violaría NOT NULL.
+// Requiere PostgreSQL 15 o superior.
+// ---------------------------------------------------------------------------
+// ALTER TABLE "RolePermission" ADD CONSTRAINT "RolePermission_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "Membership" ADD CONSTRAINT "Membership_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "CancellationPolicyTier" ADD CONSTRAINT "CancellationPolicyTier_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "Contact" ADD CONSTRAINT "Contact_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "Property" ADD CONSTRAINT "Property_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "Property" ADD CONSTRAINT "Property_address_company_fkey"
+//   FOREIGN KEY ("companyId", "addressId") REFERENCES "Address"("companyId", "id");
+// ALTER TABLE "QuoteRequest" ADD CONSTRAINT "QuoteRequest_lead_company_fkey"
+//   FOREIGN KEY ("companyId", "leadId") REFERENCES "Lead"("companyId", "id");
+// ALTER TABLE "QuoteRequest" ADD CONSTRAINT "QuoteRequest_client_company_fkey"
+//   FOREIGN KEY ("companyId", "clientId") REFERENCES "Client"("companyId", "id");
+// ALTER TABLE "QuoteRequest" ADD CONSTRAINT "QuoteRequest_property_company_fkey"
+//   FOREIGN KEY ("companyId", "propertyId") REFERENCES "Property"("companyId", "id");
+// ALTER TABLE "PropertyAssessment" ADD CONSTRAINT "PropertyAssessment_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "PropertyAssessment" ADD CONSTRAINT "PropertyAssessment_worker_company_fkey"
+//   FOREIGN KEY ("companyId", "workerId") REFERENCES "Worker"("companyId", "id")
+//   ON DELETE SET NULL ("workerId") ON UPDATE CASCADE;
+// ALTER TABLE "Quote" ADD CONSTRAINT "Quote_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "QuoteLine" ADD CONSTRAINT "QuoteLine_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "Service" ADD CONSTRAINT "Service_client_company_fkey"
+//   FOREIGN KEY ("companyId", "clientId") REFERENCES "Client"("companyId", "id");
+// ALTER TABLE "Service" ADD CONSTRAINT "Service_property_company_fkey"
+//   FOREIGN KEY ("companyId", "propertyId") REFERENCES "Property"("companyId", "id");
+// ALTER TABLE "Service" ADD CONSTRAINT "Service_offering_company_fkey"
+//   FOREIGN KEY ("companyId", "offeringId") REFERENCES "ServiceOffering"("companyId", "id");
+// ALTER TABLE "Service" ADD CONSTRAINT "Service_quote_company_fkey"
+//   FOREIGN KEY ("companyId", "quoteId") REFERENCES "Quote"("companyId", "id");
+// ALTER TABLE "Visit" ADD CONSTRAINT "Visit_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "VisitCancellation" ADD CONSTRAINT "VisitCancellation_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "TeamMember" ADD CONSTRAINT "TeamMember_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "TeamMember" ADD CONSTRAINT "TeamMember_worker_company_fkey"
+//   FOREIGN KEY ("companyId", "workerId") REFERENCES "Worker"("companyId", "id");
+// ALTER TABLE "Assignment" ADD CONSTRAINT "Assignment_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "Assignment" ADD CONSTRAINT "Assignment_worker_company_fkey"
+//   FOREIGN KEY ("companyId", "workerId") REFERENCES "Worker"("companyId", "id");
+// ALTER TABLE "ChecklistTemplateItem" ADD CONSTRAINT "ChecklistTemplateItem_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "ChecklistRun" ADD CONSTRAINT "ChecklistRun_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "ChecklistRun" ADD CONSTRAINT "ChecklistRun_template_company_fkey"
+//   FOREIGN KEY ("companyId", "checklistTemplateId") REFERENCES "ChecklistTemplate"("companyId", "id");
+// ALTER TABLE "ChecklistRunItem" ADD CONSTRAINT "ChecklistRunItem_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "ChecklistRunItem" ADD CONSTRAINT "ChecklistRunItem_template_item_company_fkey"
+//   FOREIGN KEY ("companyId", "templateItemId") REFERENCES "ChecklistTemplateItem"("companyId", "id")
+//   ON DELETE SET NULL ("templateItemId") ON UPDATE CASCADE;
+// ALTER TABLE "ChecklistRunItem" ADD CONSTRAINT "ChecklistRunItem_file_company_fkey"
+//   FOREIGN KEY ("companyId", "fileId") REFERENCES "File"("companyId", "id");
+// ALTER TABLE "VisitPhoto" ADD CONSTRAINT "VisitPhoto_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "VisitPhoto" ADD CONSTRAINT "VisitPhoto_file_company_fkey"
+//   FOREIGN KEY ("companyId", "fileId") REFERENCES "File"("companyId", "id");
+// ALTER TABLE "Incident" ADD CONSTRAINT "Incident_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "IncidentFile" ADD CONSTRAINT "IncidentFile_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "IncidentFile" ADD CONSTRAINT "IncidentFile_file_company_fkey"
+//   FOREIGN KEY ("companyId", "fileId") REFERENCES "File"("companyId", "id");
+// ALTER TABLE "Claim" ADD CONSTRAINT "Claim_company_fkey"
+//   FOREIGN KEY ("companyId") REFERENCES "Company"("id");
+// ALTER TABLE "Claim" ADD CONSTRAINT "Claim_revisit_company_fkey"
+//   FOREIGN KEY ("companyId", "revisitVisitId") REFERENCES "Visit"("companyId", "id");
+// ALTER TABLE "Client" ADD CONSTRAINT "Client_source_lead_company_fkey"
+//   FOREIGN KEY ("companyId", "sourceLeadId") REFERENCES "Lead"("companyId", "id");
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Enums ---
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUOTED
+  WON
+  LOST
+}
+
+enum LeadSource {
+  PUBLIC_FORM
+  INTERNAL
+  OTHER
+}
+
+enum QuoteRequestStatus {
+  RECEIVED
+  WAITING_ASSESSMENT
+  READY_TO_QUOTE
+  QUOTED
+  CLOSED
+  CANCELLED
+}
+
+enum QuoteRequestSource {
+  PUBLIC_FORM
+  INTERNAL
+}
+
+enum QuoteStatus {
+  DRAFT
+  IN_REVIEW
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  SUPERSEDED
+}
+
+enum QuoteClosureReason {
+  CLIENT_REJECTED
+  SUPERSEDED
+  EXPIRED
+  WITHDRAWN
+}
+
+enum QuoteLineKind {
+  AREA
+  EXTRA
+  LABOR
+  OTHER
+}
+
+enum AssessmentStatus {
+  SCHEDULED
+  DONE
+  CANCELLED
+  WAIVED
+}
+
+enum ServiceFrequency {
+  ONE_TIME
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+}
+
+enum ServiceStatus {
+  ACTIVE
+  PAUSED
+  ENDED
+}
+
+enum VisitStatus {
+  SCHEDULED
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  SKIPPED
+}
+
+enum VisitKind {
+  INITIAL
+  MAINTENANCE
+  CORRECTION
+}
+
+enum KindSuggestionReason {
+  GAP_THRESHOLD
+}
+
+enum PhotoKind {
+  BEFORE
+  AFTER
+  OTHER
+}
+
+enum PhotoVisibility {
+  INTERNAL
+  CLIENT
+}
+
+enum ChecklistRunStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum IncidentStatus {
+  OPEN
+  RESOLVED
+}
+
+enum ClaimStatus {
+  OPEN
+  REVISIT_SCHEDULED
+  RESOLVED
+  DISMISSED
+}
+
+enum StorageProvider {
+  LOCAL
+  S3
+  OCI
+}
+
+enum CancellationReference {
+  WINDOW_START
+}
+
+// --- Core ---
+
+model Company {
+  id           String   @id @default(cuid())
+  legalName    String
+  tradeName    String
+  slug         String   @unique
+  phone        String
+  email        String
+  country      String
+  region       String
+  currency     String   @db.Char(3)
+  timezone     String
+  locale       String
+  primaryColor String
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+
+  roles              Role[]
+  settings           CompanySetting[]
+  cancellationPolicy CancellationPolicy?
+  auditLogs          AuditLog[]
+  notifications      Notification[]
+  files              File[]
+  clients            Client[]
+  addresses          Address[]
+  leads              Lead[]
+  quoteRequests      QuoteRequest[]
+  serviceOfferings   ServiceOffering[]
+  services           Service[]
+  workers            Worker[]
+  teams              Team[]
+  checklistTemplates ChecklistTemplate[]
+  expenses           Expense[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  phone        String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+
+  memberships             Membership[]
+  uploadedFiles           File[]                 @relation("FileUploadedBy")
+  auditLogs               AuditLog[]             @relation("AuditActor")
+  notifications           Notification[]
+  quotesSent              Quote[]                @relation("QuoteSentBy")
+  assessmentsScheduled    PropertyAssessment[]   @relation("AssessmentScheduledBy")
+  assessmentsWaived       PropertyAssessment[]   @relation("AssessmentWaivedBy")
+  cancellationOverrides   VisitCancellation[]    @relation("CancellationOverrideBy")
+  assignmentsMade         Assignment[]           @relation("AssignmentAssignedBy")
+  incidentsRecorded       Incident[]             @relation("IncidentRecordedBy")
+  expensesRecorded        Expense[]              @relation("ExpenseRecordedBy")
+  workerProfile           Worker?                @relation("WorkerUser")
+}
+
+model Role {
+  id        String   @id @default(cuid())
+  companyId String
+  key       String
+  name      String
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  company      Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  permissions  RolePermission[]
+  memberships  Membership[]
+
+  @@unique([companyId, key])
+  @@unique([companyId, id])
+  @@index([companyId])
+}
+
+model RolePermission {
+  id            String   @id @default(cuid())
+  companyId     String
+  roleId        String
+  permissionKey String
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  role Role @relation(fields: [companyId, roleId], references: [companyId, id], onDelete: Cascade)
+
+  @@unique([roleId, permissionKey])
+  @@unique([companyId, id])
+  @@index([companyId])
+}
+
+model Membership {
+  id        String   @id @default(cuid())
+  companyId String
+  userId    String
+  roleId    String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  role Role @relation(fields: [companyId, roleId], references: [companyId, id], onDelete: Restrict)
+
+  @@unique([userId, companyId])
+  @@unique([companyId, id])
+  @@index([companyId])
+  @@index([roleId])
+}
+
+model CompanySetting {
+  id        String   @id @default(cuid())
+  companyId String
+  key       String
+  value     Json
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, key])
+  @@index([companyId])
+}
+
+model CancellationPolicy {
+  id        String                  @id @default(cuid())
+  companyId String                  @unique
+  enabled   Boolean                 @default(true)
+  reference CancellationReference   @default(WINDOW_START)
+  createdAt DateTime                @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime                @updatedAt @db.Timestamptz(3)
+
+  company Company                   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  tiers   CancellationPolicyTier[]
+
+  @@unique([companyId, id])
+}
+
+model CancellationPolicyTier {
+  id         String   @id @default(cuid())
+  companyId  String
+  policyId   String
+  upToHours  Int?
+  feePercent Decimal  @db.Decimal(5, 2)
+  sortOrder  Int
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(3)
+
+  policy CancellationPolicy @relation(fields: [companyId, policyId], references: [companyId, id], onDelete: Cascade)
+
+  @@unique([policyId, sortOrder])
+  @@unique([companyId, id])
+  @@index([companyId])
+  @@index([policyId])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  companyId   String
+  actorUserId String?
+  action      String
+  entityType  String
+  entityId    String
+  description String
+  metadata    Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  actor   User?   @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, createdAt])
+  @@index([companyId, entityType, entityId])
+  @@index([actorUserId])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  companyId String
+  userId    String
+  type      String
+  body      String
+  readAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, userId, readAt])
+}
+
+model File {
+  id               String          @id @default(cuid())
+  companyId        String
+  storageProvider  StorageProvider
+  storageKey       String
+  mimeType         String
+  size             Int
+  originalName     String
+  uploadedByUserId String
+  createdAt        DateTime        @default(now()) @db.Timestamptz(3)
+
+  company    Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  uploadedBy User               @relation("FileUploadedBy", fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+  photos     VisitPhoto[]
+  runItems   ChecklistRunItem[]
+  incidents  IncidentFile[]
+
+  @@unique([storageProvider, storageKey])
+  @@unique([companyId, id])
+  @@index([companyId])
+  @@index([uploadedByUserId])
+}
+
+// --- Comercial ---
+
+model Client {
+  id           String   @id @default(cuid())
+  companyId    String
+  number       Int
+  displayName  String
+  notes        String?
+  isActive     Boolean  @default(true)
+  sourceLeadId String?  @unique
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+
+  company    Company        @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  sourceLead Lead?          @relation(fields: [sourceLeadId], references: [id], onDelete: Restrict)
+  contacts   Contact[]
+  properties Property[]
+  requests   QuoteRequest[]
+  services   Service[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, id])
+  @@index([companyId])
+}
+
+model Contact {
+  id        String   @id @default(cuid())
+  companyId String
+  clientId  String
+  name      String
+  phone     String?
+  email     String?
+  isPrimary Boolean  @default(false)
+  notes     String?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  client Client @relation(fields: [companyId, clientId], references: [companyId, id], onDelete: Restrict)
+
+  @@unique([companyId, id])
+  @@index([companyId])
+  @@index([clientId])
+}
+
+model Address {
+  id          String   @id @default(cuid())
+  companyId   String
+  line1       String
+  line2       String?
+  city        String
+  stateRegion String
+  postalCode  String
+  country     String
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  company  Company   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  property Property?
+
+  @@unique([companyId, id])
+  @@index([companyId])
+}
+
+model Property {
+  id          String   @id @default(cuid())
+  companyId   String
+  clientId    String
+  /// MVP: una Address pertenece a una sola Property.
+  addressId   String   @unique
+  label       String
+  accessNotes String?
+  isActive    Boolean  @default(true)
+  bedrooms    Int?
+  bathrooms   Decimal? @db.Decimal(3, 1)
+  kitchens    Int?
+  sqft        Int?
+  details     Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  client   Client         @relation(fields: [companyId, clientId], references: [companyId, id], onDelete: Restrict)
+  address  Address        @relation(fields: [addressId], references: [id], onDelete: Restrict)
+  services Service[]
+  requests QuoteRequest[]
+
+  @@unique([companyId, id])
+  @@index([companyId])
+  @@index([clientId])
+}
+
+model Lead {
+  id        String     @id @default(cuid())
+  companyId String
+  number    Int
+  name      String
+  phone     String
+  email     String?
+  source    LeadSource
+  status    LeadStatus @default(NEW)
+  notes     String?
+  createdAt DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime   @updatedAt @db.Timestamptz(3)
+
+  company         Company        @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  convertedClient Client?
+  quoteRequests   QuoteRequest[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, id])
+  @@index([companyId, status])
+}
+
+model QuoteRequest {
+  id                 String             @id @default(cuid())
+  companyId          String
+  number             Int
+  leadId             String?
+  clientId           String?
+  propertyId         String?
+  requiresAssessment Boolean            @default(false)
+  status             QuoteRequestStatus @default(RECEIVED)
+  source             QuoteRequestSource
+  /// Snapshot de lo que envió el cliente. La forma la valida la aplicación.
+  clientInput        Json
+  /// Lo completa el coordinador. No sustituye a clientInput.
+  operationalScope   Json               @default("{}")
+  createdAt          DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime           @updatedAt @db.Timestamptz(3)
+
+  company   Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  lead      Lead?               @relation(fields: [leadId], references: [id], onDelete: Restrict)
+  client    Client?             @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  property  Property?           @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  assessment PropertyAssessment?
+  quotes    Quote[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, id])
+  @@index([companyId, status])
+  @@index([leadId])
+  @@index([clientId])
+  @@index([propertyId])
+}
+
+model PropertyAssessment {
+  id                String            @id @default(cuid())
+  companyId         String
+  /// MVP: una evaluación por solicitud. Reprogramar actualiza esta fila.
+  quoteRequestId    String            @unique
+  status            AssessmentStatus
+  scheduledDate     DateTime?         @db.Date
+  windowStart       DateTime?         @db.Time(0)
+  windowEnd         DateTime?         @db.Time(0)
+  workerId          String?
+  scheduledByUserId String?
+  notes             String?
+  completedAt       DateTime?         @db.Timestamptz(3)
+  waivedByUserId    String?
+  waivedAt          DateTime?         @db.Timestamptz(3)
+  waiveReason       String?
+  cancelledAt       DateTime?         @db.Timestamptz(3)
+  createdAt         DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime          @updatedAt @db.Timestamptz(3)
+
+  quoteRequest QuoteRequest @relation(fields: [companyId, quoteRequestId], references: [companyId, id], onDelete: Restrict)
+  worker       Worker?      @relation(fields: [workerId], references: [id], onDelete: SetNull)
+  scheduledBy  User?        @relation("AssessmentScheduledBy", fields: [scheduledByUserId], references: [id], onDelete: SetNull)
+  waivedBy     User?        @relation("AssessmentWaivedBy", fields: [waivedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([companyId, quoteRequestId])
+  @@unique([companyId, id])
+  @@index([companyId, scheduledDate])
+  @@index([workerId])
+}
+
+model Quote {
+  id            String              @id @default(cuid())
+  companyId     String
+  quoteRequestId String
+  number        Int
+  status        QuoteStatus         @default(DRAFT)
+  currency      String              @db.Char(3)
+  validUntil    DateTime?           @db.Date
+  internalNotes String?
+  sentAt        DateTime?           @db.Timestamptz(3)
+  sentByUserId  String?
+  acceptedAt    DateTime?           @db.Timestamptz(3)
+  closureReason QuoteClosureReason?
+  closedAt      DateTime?           @db.Timestamptz(3)
+  createdAt     DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime            @updatedAt @db.Timestamptz(3)
+
+  quoteRequest QuoteRequest @relation(fields: [companyId, quoteRequestId], references: [companyId, id], onDelete: Restrict)
+  sentBy       User?        @relation("QuoteSentBy", fields: [sentByUserId], references: [id], onDelete: SetNull)
+  lines        QuoteLine[]
+  service      Service?
+
+  @@unique([companyId, number])
+  @@unique([companyId, id])
+  @@index([companyId, status])
+  @@index([quoteRequestId, status])
+}
+
+model QuoteLine {
+  id          String        @id @default(cuid())
+  companyId   String
+  quoteId     String
+  sortOrder   Int
+  kind        QuoteLineKind
+  description String
+  quantity    Decimal       @db.Decimal(10, 2)
+  unit        String
+  unitPrice   Decimal       @db.Decimal(12, 2)
+  amount      Decimal       @db.Decimal(12, 2)
+  createdAt   DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime      @updatedAt @db.Timestamptz(3)
+
+  quote Quote @relation(fields: [companyId, quoteId], references: [companyId, id], onDelete: Cascade)
+
+  @@unique([companyId, id])
+  @@index([quoteId, sortOrder])
+  @@index([companyId])
+}
+
+// --- Limpieza ---
+
+model ServiceOffering {
+  id          String   @id @default(cuid())
+  companyId   String
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  company  Company   @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  services Service[]
+
+  @@unique([companyId, name])
+  @@unique([companyId, id])
+  @@index([companyId])
+}
+
+model Service {
+  id         String           @id @default(cuid())
+  companyId  String
+  clientId   String
+  propertyId String
+  offeringId String?
+  /// MVP: como máximo un Service por Quote. Null repetido sí está permitido.
+  quoteId    String?          @unique
+  number     Int
+  frequency  ServiceFrequency
+  status     ServiceStatus    @default(ACTIVE)
+  startDate  DateTime         @db.Date
+  endDate    DateTime?        @db.Date
+  notes      String?
+  createdAt  DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime         @updatedAt @db.Timestamptz(3)
+
+  company  Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  client   Client           @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  property Property         @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  offering ServiceOffering? @relation(fields: [offeringId], references: [id], onDelete: Restrict)
+  quote    Quote?           @relation(fields: [quoteId], references: [id], onDelete: Restrict)
+  visits   Visit[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, id])
+  @@index([companyId, status])
+  @@index([clientId])
+  @@index([propertyId])
+  @@index([offeringId])
+}
+
+model Visit {
+  id                       String                @id @default(cuid())
+  /// Obligatorio. Participa en la FK compuesta hacia Service.
+  companyId                String
+  serviceId                String
+  number                   Int
+  visitKind                VisitKind
+  status                   VisitStatus           @default(SCHEDULED)
+  scheduledDate            DateTime              @db.Date
+  windowStart              DateTime              @db.Time(0)
+  windowEnd                DateTime              @db.Time(0)
+  actualStartedAt          DateTime?             @db.Timestamptz(3)
+  actualEndedAt            DateTime?             @db.Timestamptz(3)
+  estimatedDurationMinutes Int
+  photosRequired           Boolean
+  requiredPhotoKinds       PhotoKind[]           @default([])
+  kindSuggestion           VisitKind?
+  kindSuggestionReason     KindSuggestionReason?
+  createdAt                DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime              @updatedAt @db.Timestamptz(3)
+
+  service        Service            @relation(fields: [companyId, serviceId], references: [companyId, id], onDelete: Restrict)
+  cancellation   VisitCancellation?
+  assignments    Assignment[]
+  checklistRun   ChecklistRun?
+  photos         VisitPhoto[]
+  incidents      Incident[]
+  claimsAsOrigin Claim[]            @relation("ClaimOriginVisit")
+  claimAsRevisit Claim?             @relation("ClaimRevisitVisit")
+
+  @@unique([companyId, number])
+  @@unique([companyId, id])
+  @@index([companyId, scheduledDate])
+  @@index([companyId, status])
+  @@index([serviceId, scheduledDate])
+}
+
+model VisitCancellation {
+  id                     String   @id @default(cuid())
+  companyId              String
+  visitId                String   @unique
+  cancelledAt            DateTime @db.Timestamptz(3)
+  hoursBeforeWindowStart Decimal  @db.Decimal(8, 2)
+  policyFeePercent       Decimal  @db.Decimal(5, 2)
+  appliedFeePercent      Decimal  @db.Decimal(5, 2)
+  overrideReason         String?
+  overriddenByUserId     String?
+  createdAt              DateTime @default(now()) @db.Timestamptz(3)
+
+  visit        Visit @relation(fields: [companyId, visitId], references: [companyId, id], onDelete: Cascade)
+  overriddenBy User? @relation("CancellationOverrideBy", fields: [overriddenByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([companyId, visitId])
+  @@unique([companyId, id])
+  @@index([companyId])
+}
+
+model Worker {
+  id        String   @id @default(cuid())
+  companyId String
+  name      String
+  phone     String?
+  notes     String?
+  isActive  Boolean  @default(true)
+  /// Reservado y vacío en el MVP. No crea cuenta ni acceso.
+  userId    String?  @unique
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  company     Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  user        User?                @relation("WorkerUser", fields: [userId], references: [id], onDelete: Restrict)
+  teams       TeamMember[]
+  assignments Assignment[]
+  assessments PropertyAssessment[]
+
+  @@unique([companyId, id])
+  @@index([companyId])
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  companyId String
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  company Company      @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  members TeamMember[]
+
+  @@unique([companyId, name])
+  @@unique([companyId, id])
+  @@index([companyId])
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  companyId String
+  teamId    String
+  workerId  String
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  team   Team   @relation(fields: [companyId, teamId], references: [companyId, id], onDelete: Cascade)
+  worker Worker @relation(fields: [workerId], references: [id], onDelete: Restrict)
+
+  @@unique([teamId, workerId])
+  @@unique([companyId, id])
+  @@index([companyId])
+  @@index([workerId])
+}
+
+model Assignment {
+  id               String   @id @default(cuid())
+  companyId        String
+  visitId          String
+  workerId         String
+  assignedByUserId String
+  assignedAt       DateTime @default(now()) @db.Timestamptz(3)
+
+  visit      Visit  @relation(fields: [companyId, visitId], references: [companyId, id], onDelete: Cascade)
+  worker     Worker @relation(fields: [workerId], references: [id], onDelete: Restrict)
+  assignedBy User   @relation("AssignmentAssignedBy", fields: [assignedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([visitId, workerId])
+  @@unique([companyId, id])
+  @@index([companyId, workerId])
+  @@index([visitId])
+}
+
+model ChecklistTemplate {
+  id        String    @id @default(cuid())
+  companyId String
+  name      String
+  visitKind VisitKind
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+
+  company Company                 @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  items   ChecklistTemplateItem[]
+  runs    ChecklistRun[]
+
+  @@unique([companyId, id])
+  @@index([companyId, visitKind])
+}
+
+model ChecklistTemplateItem {
+  id         String   @id @default(cuid())
+  companyId  String
+  templateId String
+  label      String
+  sortOrder  Int
+  isRequired Boolean  @default(false)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(3)
+
+  template ChecklistTemplate  @relation(fields: [companyId, templateId], references: [companyId, id], onDelete: Cascade)
+  runItems ChecklistRunItem[]
+
+  @@unique([companyId, id])
+  @@index([templateId, sortOrder])
+  @@index([companyId])
+}
+
+model ChecklistRun {
+  id                  String             @id @default(cuid())
+  companyId           String
+  /// MVP: como máximo una corrida por visita. Se crea al prepararla.
+  visitId             String             @unique
+  checklistTemplateId String
+  status              ChecklistRunStatus @default(IN_PROGRESS)
+  createdAt           DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime           @updatedAt @db.Timestamptz(3)
+
+  visit    Visit                  @relation(fields: [companyId, visitId], references: [companyId, id], onDelete: Restrict)
+  template ChecklistTemplate      @relation(fields: [checklistTemplateId], references: [id], onDelete: Restrict)
+  items    ChecklistRunItem[]
+
+  @@unique([companyId, visitId])
+  @@unique([companyId, id])
+  @@index([companyId])
+  @@index([checklistTemplateId])
+}
+
+model ChecklistRunItem {
+  id             String   @id @default(cuid())
+  companyId      String
+  runId          String
+  templateItemId String?
+  label          String
+  sortOrder      Int
+  isRequired     Boolean
+  isDone         Boolean  @default(false)
+  note           String?
+  fileId         String?  @unique
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+
+  run          ChecklistRun          @relation(fields: [companyId, runId], references: [companyId, id], onDelete: Cascade)
+  templateItem ChecklistTemplateItem? @relation(fields: [templateItemId], references: [id], onDelete: SetNull)
+  file         File?                  @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, id])
+  @@index([runId, sortOrder])
+  @@index([companyId])
+}
+
+model VisitPhoto {
+  id         String          @id @default(cuid())
+  companyId  String
+  visitId    String
+  fileId     String          @unique
+  kind       PhotoKind
+  visibility PhotoVisibility @default(INTERNAL)
+  capturedAt DateTime?       @db.Timestamptz(3)
+  note       String?
+  createdAt  DateTime        @default(now()) @db.Timestamptz(3)
+
+  visit Visit @relation(fields: [companyId, visitId], references: [companyId, id], onDelete: Restrict)
+  file  File  @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, id])
+  @@index([visitId])
+  @@index([companyId])
+}
+
+model Incident {
+  id               String         @id @default(cuid())
+  companyId        String
+  visitId          String
+  description      String
+  occurredAt       DateTime       @db.Timestamptz(3)
+  status           IncidentStatus @default(OPEN)
+  resolutionNotes  String?
+  recordedByUserId String
+  createdAt        DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime       @updatedAt @db.Timestamptz(3)
+
+  visit      Visit          @relation(fields: [companyId, visitId], references: [companyId, id], onDelete: Restrict)
+  recordedBy User           @relation("IncidentRecordedBy", fields: [recordedByUserId], references: [id], onDelete: Restrict)
+  files      IncidentFile[]
+
+  @@unique([companyId, id])
+  @@index([visitId])
+  @@index([companyId, status])
+}
+
+model IncidentFile {
+  id         String   @id @default(cuid())
+  companyId  String
+  incidentId String
+  fileId     String
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  incident Incident @relation(fields: [companyId, incidentId], references: [companyId, id], onDelete: Cascade)
+  file     File     @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@unique([incidentId, fileId])
+  @@unique([companyId, id])
+  @@index([fileId])
+  @@index([companyId])
+}
+
+model Claim {
+  id              String      @id @default(cuid())
+  companyId       String
+  originVisitId   String
+  revisitVisitId  String?     @unique
+  description     String
+  openedAt        DateTime    @db.Timestamptz(3)
+  status          ClaimStatus @default(OPEN)
+  resolutionNotes String?
+  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime    @updatedAt @db.Timestamptz(3)
+
+  originVisit  Visit  @relation("ClaimOriginVisit", fields: [companyId, originVisitId], references: [companyId, id], onDelete: Restrict)
+  revisitVisit Visit? @relation("ClaimRevisitVisit", fields: [revisitVisitId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, id])
+  @@index([originVisitId])
+  @@index([companyId, status])
+}
+
+model Expense {
+  id               String   @id @default(cuid())
+  companyId        String
+  number           Int
+  description      String
+  amount           Decimal  @db.Decimal(12, 2)
+  currency         String   @db.Char(3)
+  incurredOn       DateTime @db.Date
+  notes            String?
+  recordedByUserId String
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
+
+  company    Company @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  recordedBy User    @relation("ExpenseRecordedBy", fields: [recordedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, number])
+  @@index([companyId, incurredOn])
+  @@index([recordedByUserId])
+}
