@@ -1,5 +1,6 @@
-{
+﻿{
   "name": "azul-cerezo",
+  "version": "0.1.0",
   "private": true,
   "engines": {
     "node": ">=20"
@@ -7,6 +8,12 @@
   "workspaces": [
     "apps/web",
     "apps/api",
-    "packages/database"
-  ]
+    "packages/database",
+    "packages/shared",
+    "packages/config"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces"
+  }
 }
