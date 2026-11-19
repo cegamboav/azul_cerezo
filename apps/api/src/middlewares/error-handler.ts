@@ -1,4 +1,5 @@
 import type { ErrorRequestHandler } from "express";
+import { formatErrorForLog } from "../config/log-error.js";
 import { logger } from "../config/logger.js";
 import { AppError } from "../modules/core/app-error.js";
 
@@ -11,7 +12,7 @@ function isInvalidJson(err: unknown): boolean {
   return "status" in err && err.status === 400;
 }
 
-export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   if (res.headersSent) {
     return;
   }
@@ -29,6 +30,6 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   }
 
   const statusCode = err instanceof AppError ? err.statusCode : 500;
-  logger.error("Error no controlado", err);
+  logger.error(formatErrorForLog(`${req.method} ${req.path}`, err));
   res.status(statusCode).json({ error: { message: GENERIC_MESSAGE } });
 };

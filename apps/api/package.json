@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "@azul/api",
   "version": "0.1.0",
   "private": true,
@@ -10,19 +10,25 @@
     "dev": "tsx watch src/index.ts",
     "build": "npm run build --workspace @azul/database && tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "typecheck": "npm run typecheck --workspace @azul/database && tsc -p tsconfig.json --noEmit"
+    "test": "tsx --test src/config/env.test.ts src/config/log-error.test.ts src/modules/core/permissions.test.ts src/modules/auth/password.test.ts src/modules/auth/jwt.test.ts src/modules/auth/http.test.ts src/modules/auth/password-change.integration.test.ts",
+    "typecheck": "npm run typecheck --workspace @azul/database && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {
     "@azul/database": "0.1.0",
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "17.4.2",
     "express": "^4.21.2",
-    "helmet": "^8.1.0"
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.19.0",
+    "embedded-postgres": "^18.7.0-beta.19",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }

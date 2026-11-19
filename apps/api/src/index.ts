@@ -1,6 +1,7 @@
 import { createPrismaClient } from "@azul/database";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config/env.js";
+import { formatErrorForLog } from "./config/log-error.js";
 import { logger } from "./config/logger.js";
 
 const config = loadConfig();
@@ -29,10 +30,10 @@ process.on("SIGTERM", () => {
 });
 
 process.on("unhandledRejection", (reason) => {
-  logger.error("Promesa rechazada sin manejar", reason);
+  logger.error(formatErrorForLog("Promesa rechazada sin manejar", reason));
 });
 
 process.on("uncaughtException", (error) => {
-  logger.error("Excepción no capturada", error);
+  logger.error(formatErrorForLog("Excepción no capturada", error));
   process.exit(1);
 });

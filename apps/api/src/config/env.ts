@@ -8,6 +8,7 @@ export interface AppConfig {
   port: number;
   corsOrigin: string;
   databaseUrl: string;
+  jwtSecret: string;
 }
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
@@ -87,6 +88,17 @@ function readCorsOrigin(raw: string | undefined): string {
   return origin;
 }
 
+export function readJwtSecret(raw: string | undefined): string {
+  const secret = raw ?? "";
+  if (secret.trim() === "") {
+    throw new Error("Falta JWT_SECRET.");
+  }
+  if (Buffer.byteLength(secret, "utf8") < 32) {
+    throw new Error("JWT_SECRET debe tener al menos 32 bytes.");
+  }
+  return secret;
+}
+
 export function loadConfig(): AppConfig {
   loadEnvFiles();
   return {
@@ -94,5 +106,6 @@ export function loadConfig(): AppConfig {
     port: readPort(process.env.PORT),
     corsOrigin: readCorsOrigin(process.env.CORS_ORIGIN),
     databaseUrl: readDatabaseUrl(process.env.DATABASE_URL),
+    jwtSecret: readJwtSecret(process.env.JWT_SECRET),
   };
 }
