@@ -31,7 +31,7 @@ function findRepoEnv(startDir: string): string | undefined {
   return undefined;
 }
 
-function loadEnvFiles(): void {
+export function loadEnvFiles(): void {
   const candidates = [
     path.resolve(process.cwd(), ".env"),
     findRepoEnv(sourceDir),
@@ -57,7 +57,7 @@ function readPort(raw: string | undefined): number {
   return port;
 }
 
-function readDatabaseUrl(raw: string | undefined): string {
+export function readDatabaseUrl(raw: string | undefined): string {
   const databaseUrl = raw?.trim() ?? "";
   if (databaseUrl === "") {
     throw new Error("Falta DATABASE_URL.");

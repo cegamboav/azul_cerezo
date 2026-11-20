@@ -1,22 +1,21 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createPrismaClient, type PrismaClient } from "@azul/database";
-import EmbeddedPostgres from "embedded-postgres";
 import { AppError } from "../core/app-error.js";
+import {
+  createEmbeddedCluster,
+  destroyEmbeddedCluster,
+  type EmbeddedCluster,
+} from "../../testing/embedded-postgres-cluster.test.js";
 import { changePassword } from "./change-password.js";
 import { PrismaAuthRepository } from "./prisma-repository.js";
 import { hashPassword, verifyPassword } from "./password.js";
 
 const databaseName = "azul_auth_test";
-const port = 55432;
-const user = "postgres";
-const password = "postgres";
 
 function repoRoot(): string {
   let current = path.dirname(fileURLToPath(import.meta.url));
@@ -60,28 +59,17 @@ async function applyMigrations(prisma: PrismaClient): Promise<void> {
 }
 
 test("PostgreSQL impide que dos cambios concurrentes se sobrescriban", async () => {
-  const dataDir = await mkdtemp(path.join(tmpdir(), "azul-auth-pg-"));
-  const postgres = new EmbeddedPostgres({
-    databaseDir: dataDir,
-    port,
-    user,
-    password,
-    persistent: false,
-    onLog: () => undefined,
-    onError: () => undefined,
-  });
-  let started = false;
+  let cluster: EmbeddedCluster | undefined;
   let prisma: PrismaClient | undefined;
   let companyId = "";
   let roleId = "";
   let userId = "";
   try {
-    await postgres.initialise();
-    await postgres.start();
-    started = true;
-    await postgres.createDatabase(databaseName);
-    const connectionString = `postgresql://${user}:${password}@127.0.0.1:${port}/${databaseName}`;
-    prisma = createPrismaClient(connectionString);
+    cluster = await createEmbeddedCluster({
+      databaseName,
+      dataDirPrefix: "azul-auth-pg-",
+    });
+    prisma = createPrismaClient(cluster.connectionString);
     await applyMigrations(prisma);
 
     const suffix = randomUUID();
@@ -187,9 +175,6 @@ test("PostgreSQL impide que dos cambios concurrentes se sobrescriban", async () 
       await prisma.company.delete({ where: { id: companyId } }).catch(() => undefined);
     }
     await prisma?.$disconnect();
-    if (started) {
-      await postgres.stop();
-    }
-    await rm(dataDir, { recursive: true, force: true });
+    await destroyEmbeddedCluster(cluster);
   }
 });

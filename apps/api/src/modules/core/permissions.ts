@@ -27,6 +27,14 @@ export const ROLE_KEYS = [
 
 export type RoleKey = (typeof ROLE_KEYS)[number];
 
+export const ROLE_NAMES: Record<RoleKey, string> = {
+  OWNER: "Dueño",
+  ADMIN: "Administrador",
+  COORDINATOR: "Coordinador",
+  WORKER: "Trabajador",
+  CLIENT: "Cliente",
+};
+
 const coordinatorPermissions = [
   "clients.read",
   "clients.write",

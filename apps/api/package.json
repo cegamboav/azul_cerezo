@@ -10,7 +10,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "npm run build --workspace @azul/database && tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "test": "tsx --test src/config/env.test.ts src/config/log-error.test.ts src/modules/core/permissions.test.ts src/modules/auth/password.test.ts src/modules/auth/jwt.test.ts src/modules/auth/http.test.ts src/modules/auth/password-change.integration.test.ts",
+    "db:bootstrap": "tsx src/bootstrap/main.ts",
+    "test": "tsx --test src/config/env.test.ts src/config/log-error.test.ts src/modules/core/permissions.test.ts src/modules/auth/password.test.ts src/modules/auth/jwt.test.ts src/modules/auth/http.test.ts src/modules/auth/password-change.integration.test.ts src/bootstrap/identity.test.ts",
     "typecheck": "npm run typecheck --workspace @azul/database && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {

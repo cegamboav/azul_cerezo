@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PERMISSIONS, ROLE_PERMISSIONS } from "./permissions.js";
+import { PERMISSIONS, ROLE_KEYS, ROLE_NAMES, ROLE_PERMISSIONS } from "./permissions.js";
 
 test("el catálogo y la matriz aprobados quedan en código", () => {
   assert.equal(PERMISSIONS.length, 14);
@@ -15,4 +15,7 @@ test("el catálogo y la matriz aprobados quedan en código", () => {
   assert.equal(ROLE_PERMISSIONS.COORDINATOR.includes("users.manage"), false);
   assert.deepEqual(ROLE_PERMISSIONS.WORKER, []);
   assert.deepEqual(ROLE_PERMISSIONS.CLIENT, []);
+  for (const key of ROLE_KEYS) {
+    assert.equal(ROLE_NAMES[key].length > 0, true);
+  }
 });
